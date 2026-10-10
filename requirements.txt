@@ -1,0 +1,4 @@
+pyrekordbox>=0.4.4
+rapidfuzz
+spotipy>=2.25
+requests

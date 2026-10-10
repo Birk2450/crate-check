@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# personal config and output - never commit
+aliases.json
+settings.json
+report/
+to_download*
+*.csv
+.env
+.crate_check_token*
+master.db*
+.DS_Store
