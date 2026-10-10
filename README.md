@@ -66,7 +66,9 @@ Reports go to `./report/` (`to_download.md`, `.csv`). They contain Spotify song 
 Copy the examples and edit them (the real files are git-ignored):
 
 - `aliases.json` pairs playlists whose names differ between RekordBox and Spotify.
-- `settings.json` lists RekordBox folders to leave out when you check `All` (their songs still count as "in RekordBox").
+- `settings.json` has two lists:
+  - `skip_folders`: RekordBox folders to leave out when you check `All` (their songs still count as "in RekordBox").
+  - `also_check`: Spotify playlists that have no RekordBox twin, such as a dumping ground for songs whose genre you don't know yet. `All` includes them, and you can also type their names. Their songs are compared with your whole RekordBox library, so "missing" means "not anywhere in RekordBox".
 
 ## Limits
 

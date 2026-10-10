@@ -313,7 +313,7 @@ def load_spotify_api(client: SpotifyClient, only=None) -> dict[str, list[Track]]
     request only the data you need); the playlist-name list is still fetched to find them.
     """
     get = client.get
-    only_keys = {norm_name(o) for o in only} if only else None
+    only_keys = {norm_name(o) for o in only} if only is not None else None
 
     me = get("https://api.spotify.com/v1/me")["id"]
     out: dict[str, list[Track]] = {}
@@ -325,7 +325,7 @@ def load_spotify_api(client: SpotifyClient, only=None) -> dict[str, list[Track]]
             if pl["owner"]["id"] != me:       # only playlists you own expose their items
                 client.foreign_names.append(pl["name"])
                 continue
-            if only_keys and norm_name(pl["name"]) not in only_keys:
+            if only_keys is not None and norm_name(pl["name"]) not in only_keys:
                 out.setdefault(pl["name"], [])   # name only, so it is still reported as "not requested"
                 continue
             tracks = []
@@ -382,20 +382,31 @@ def load_aliases(path: Path) -> dict[str, str]:
     return {norm_name(k): str(v) for k, v in raw.items() if not str(k).startswith("_")}
 
 
+def load_settings(path: Path) -> dict:
+    """Optional settings.json: {"skip_folders": [...], "also_check": [...]} (both lists of names)."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"skip_folders": [], "also_check": []}
+    except (OSError, ValueError) as e:
+        sys.exit(f"Could not read {path.name}: {e}")
+    return {k: [str(x) for x in raw.get(k, [])] for k in ("skip_folders", "also_check")}
+
+
 def sp_name(rb_name: str, aliases: dict | None) -> str:
     """The Spotify playlist name that belongs to a RekordBox playlist (via aliases.json, else the same)."""
     return (aliases or {}).get(norm_name(rb_name), rb_name)
 
 
-def compare(rb_playlists, rb_collection, sp_playlists, only=None, aliases=None):
+def compare(rb_playlists, rb_collection, sp_playlists, only=None, aliases=None, extras=None):
     # Keys are on the Spotify side's naming, so an alias makes the two lists meet.
     rb_by_key = {norm_name(sp_name(n, aliases)): (n, t) for n, t in rb_playlists.items()}
     sp_by_key = {norm_name(n): (n, t) for n, t in sp_playlists.items()}
-    only_keys = {norm_name(sp_name(o, aliases)) for o in only} if only else None
+    only_keys = {norm_name(sp_name(o, aliases)) for o in only} if only is not None else None
 
     results, rb_only, sp_only = [], [], []
     for key, (rb_name, rb_tracks) in rb_by_key.items():
-        if only_keys and key not in only_keys:
+        if only_keys is not None and key not in only_keys:
             continue
         if key not in sp_by_key:
             rb_only.append(rb_name)
@@ -420,7 +431,28 @@ def compare(rb_playlists, rb_collection, sp_playlists, only=None, aliases=None):
                 missing.append(sp)
         results.append(dict(name=rb_name, total=len(sp_tracks), have=have,
                             missing=missing, elsewhere=elsewhere, unsure=unsure))
-    sp_only = [n for k, (n, _) in sp_by_key.items() if k not in rb_by_key and not (only_keys and k not in only_keys)]
+    # Spotify-only playlists you asked for (e.g. "Unidentified"): no RekordBox twin, so their songs are
+    # compared with the whole RekordBox library. "Missing" then means: not anywhere in RekordBox.
+    for e in extras or []:
+        k = norm_name(e)
+        if k in rb_by_key:
+            continue                      # it has a RekordBox twin and is handled above
+        if k not in sp_by_key:
+            rb_only.append(e)             # reported as "not checked", with the nearest Spotify names
+            continue
+        sp_n, sp_tracks = sp_by_key[k]
+        missing, unsure, have = [], [], 0
+        for sp in sp_tracks:
+            s, m = best_match(sp, rb_collection)
+            if s >= MATCH:
+                have += 1
+            elif s >= UNSURE:
+                unsure.append((sp, m, s))
+            else:
+                missing.append(sp)
+        results.append(dict(name=sp_n, total=len(sp_tracks), have=have, missing=missing,
+                            elsewhere=[], unsure=unsure, extra=True))
+    sp_only = [n for k, (n, _) in sp_by_key.items() if k not in rb_by_key and not (only_keys is not None and k not in only_keys)]
     return results, rb_only, sp_only
 
 
@@ -502,9 +534,17 @@ def main():
             print(f"  {'    ' * depth}{name}  {label}")
         return
 
-    only = expand_only(args.only, rb_playlists, rb_paths) if args.only else None
-    if args.only and not only:
-        sys.exit("Nothing to check.")
+    settings = load_settings(Path(__file__).with_name("settings.json"))
+    extras = settings["also_check"]
+    if args.only:
+        extra_keys = {norm_name(e): e for e in extras}
+        extras = [extra_keys[norm_name(o)] for o in args.only if norm_name(o) in extra_keys]
+        rest = [o for o in args.only if norm_name(o) not in extra_keys]
+        only = expand_only(rest, rb_playlists, rb_paths) if rest else []
+        if not only and not extras:
+            sys.exit("Nothing to check.")
+    else:
+        only = None
 
     print("Reading Spotify...")
     if args.make_playlist and args.csv_dir:
@@ -512,11 +552,11 @@ def main():
                  "With CSVs, paste the links in report/to_download_links.txt into a new playlist instead.")
     client = None if args.csv_dir else SpotifyClient(write=args.make_playlist)
     aliases = load_aliases(Path(__file__).with_name("aliases.json"))
-    sp_wanted = [sp_name(n, aliases) for n in only] if only else None
+    sp_wanted = ([sp_name(n, aliases) for n in only] + extras) if only is not None else None
     sp_playlists = load_spotify_csv(args.csv_dir) if args.csv_dir else load_spotify_api(client, sp_wanted)
     print(f"  {len(sp_playlists)} playlists")
 
-    results, rb_only, sp_only = compare(rb_playlists, rb_collection, sp_playlists, only, aliases)
+    results, rb_only, sp_only = compare(rb_playlists, rb_collection, sp_playlists, only, aliases, extras)
     foreign = getattr(client, "foreign_names", [])
     hints = {n: explain_unmatched(n, list(sp_playlists), foreign) for n in rb_only}
     write_report(results, rb_only, sp_only, args.out, hints)

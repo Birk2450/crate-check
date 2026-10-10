@@ -56,3 +56,14 @@ def test_folder_expansion(capsys):
     assert sorted(c.expand_only(["House"], playlists, paths)) == ["Amapiano", "Deep"]
     assert c.expand_only(["Solo"], playlists, paths) == ["Solo"]
     assert c.expand_only(["Nope"], playlists, paths) == []
+
+
+def test_extra_playlist_is_compared_with_whole_collection():
+    have = T("Known Song", "Artist")
+    new = T("Brand New", "Someone")
+    collection = [have]
+    sp = {"Unidentified": [T("Known Song", "Artist"), new]}
+    results, not_checked, _ = c.compare({}, collection, sp, only=[], extras=["Unidentified", "Gone"])
+    assert len(results) == 1 and results[0]["extra"] and results[0]["have"] == 1
+    assert [t.title for t in results[0]["missing"]] == ["Brand New"]
+    assert not_checked == ["Gone"]          # asked for, but not found in Spotify

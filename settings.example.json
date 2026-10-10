@@ -1,4 +1,5 @@
 {
-  "_about": "Copy to settings.json. RekordBox folders whose playlists are left out when you check 'All'. Typing a folder or playlist name yourself still checks it. Their songs still count as 'in RekordBox'.",
-  "skip_folders": ["Mixtapes", "Gigs"]
+  "_about": "Copy to settings.json. skip_folders: RekordBox folders left out when you check 'All' (their songs still count as 'in RekordBox'). also_check: Spotify playlists with no RekordBox twin that 'All' should include; their songs are compared with your whole RekordBox library.",
+  "skip_folders": ["Mixtapes", "Gigs"],
+  "also_check": ["Unidentified", "Other"]
 }

@@ -39,7 +39,8 @@ class UserError(Exception):
 # State and the actual work
 # --------------------------------------------------------------------------
 class State:
-    def __init__(self, rb_db: Path, folder_name: str, aliases: dict, skip_folders=None):
+    def __init__(self, rb_db: Path, folder_name: str, aliases: dict, skip_folders=None, also_check=None):
+        self.also_check = list(also_check or [])       # Spotify-only playlists, e.g. "Unidentified"
         self.skip = {d.norm_name(f) for f in (skip_folders or [])}
         self.skip_labels = list(skip_folders or [])
         self.rb_db = rb_db
@@ -103,6 +104,7 @@ class State:
             "outline": [{"depth": dp, "name": n, "kind": k, "count": c} for dp, n, k, c in self.outline],
             "spotify": {"state": self.sp_state, "user": self.sp_user, "error": self.sp_error},
             "folder": self.folder_name,
+            "extras": self.also_check,
         }
 
     def check(self, query: str) -> dict:
@@ -112,6 +114,7 @@ class State:
         if q.lower() in ("", "all", "*"):
             names = [n for n in playlists
                      if not any(d.norm_name(f) in self.skip for f in paths.get(n, []))]
+            extras = list(self.also_check)
             mode = "all"
             left_out = len(playlists) - len(names)
             if left_out:
@@ -119,26 +122,29 @@ class State:
                              "Type a folder name to check one anyway.")
         else:
             tokens = [t.strip() for t in re.split(r"[,;\n]+", q) if t.strip()]
+            extra_keys = {d.norm_name(e): e for e in self.also_check}
+            extras = [extra_keys[d.norm_name(t)] for t in tokens if d.norm_name(t) in extra_keys]
+            rest = [t for t in tokens if d.norm_name(t) not in extra_keys]
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                names = d.expand_only(tokens, playlists, paths)
+                names = d.expand_only(rest, playlists, paths) if rest else []
             notes = [ln.strip().split(" Playlists:")[0].replace(" -> ", " has ")
                      for ln in buf.getvalue().splitlines() if ln.strip()]
             mode = "some"
-            if not names:
+            if not names and not extras:
                 bad = ", ".join(f"'{t}'" for t in tokens)
                 raise UserError(f"No RekordBox playlist or folder is called {bad}. Try the suggestions in the list.")
 
         client = self.spotify()
-        wanted = [d.sp_name(n, self.aliases) for n in names]
+        wanted = [d.sp_name(n, self.aliases) for n in names] + extras
         sp_playlists = d.load_spotify_api(client, wanted)        # only reads tracks of the wanted ones
-        results, rb_only, _ = d.compare(playlists, collection, sp_playlists, names, self.aliases)
+        results, rb_only, _ = d.compare(playlists, collection, sp_playlists, names, self.aliases, extras)
 
         def tr(t):
             return {"title": t.title, "artist": t.artist, "url": t.url, "uri": t.uri}
 
         out_results = [{
-            "name": r["name"], "total": r["total"], "have": r["have"],
+            "name": r["name"], "total": r["total"], "have": r["have"], "extra": bool(r.get("extra")),
             "missing": [tr(t) for t in r["missing"]],
             "elsewhere": [{"spotify": tr(a), "rekordbox": tr(b)} for a, b in r["elsewhere"]],
             "unsure": [{"spotify": tr(a), "rekordbox": tr(b), "score": round(s)} for a, b, s in r["unsure"]],
@@ -494,11 +500,13 @@ const safeSpotify = (u) => typeof u === "string" && u.startsWith("https://open.s
 
 /* ---------- status, suggestions, chips ---------- */
 let items = [];
+let extraNames = [];
 let folderName = "your DJ folder";
 const q = $("#q"), sugg = $("#sugg");
 
 function applyStatus(s) {
   folderName = s.folder || folderName;
+  extraNames = s.extras || [];
   const rb = $("#stRb");
   rb.className = "stat ok";
   rb.lastChild.textContent = "RekordBox: " + plural(s.rb.playlists, "playlist", "playlists");
@@ -522,6 +530,7 @@ function applyStatus(s) {
 function buildItems(outline) {
   items = [{name: "All", kind: "all"}];
   for (const o of outline || []) if (o.kind === "folder" || o.kind === "playlist") items.push({name: o.name, kind: o.kind});
+  for (const e of extraNames) items.push({name: e, kind: "extra"});
 }
 
 async function pollStatus() {
@@ -580,7 +589,7 @@ function showSugg() {
   sugg.replaceChildren(...shown.map((it, idx) => h("li", {role: "option", "aria-selected": String(idx === active),
     onmousedown: (e) => { e.preventDefault(); pick(it); }},
     it.kind === "folder" ? h("span", {html: ICON.folder, style: "display:contents"}) : null,
-    it.name, h("span", {class: "kind", text: it.kind === "folder" ? "folder" : it.kind === "all" ? "everything" : "playlist"}))));
+    it.name, h("span", {class: "kind", text: it.kind === "folder" ? "folder" : it.kind === "all" ? "everything" : it.kind === "extra" ? "Spotify only" : "playlist"}))));
   sugg.hidden = false; q.setAttribute("aria-expanded", "true");
 }
 function pick(it) {
@@ -654,6 +663,7 @@ function crate(r, pos) {
       (r.missing.length + r.unsure.length) ? h("span", {class: "badge", text: r.missing.length + r.unsure.length,
         "aria-label": (r.missing.length + r.unsure.length) + " to download"}) : null),
     h("div", {class: "crate-body"},
+      r.extra ? h("p", {class: "note", text: "Not a RekordBox playlist. Its songs are compared with your whole RekordBox library."}) : null,
       h("div", {class: "meterrow"},
         h("div", {class: "meter", role: "img", "aria-label": r.have + " of " + r.total + " in RekordBox"}, h("i", {style: "width:" + pct + "%"})),
         h("p", {text: r.have + " of " + r.total + " in RekordBox"})),
@@ -751,11 +761,9 @@ def main():
     args = ap.parse_args()
 
     here = Path(__file__).parent
-    try:
-        skip = json.loads((here / "settings.json").read_text(encoding="utf-8")).get("skip_folders", [])
-    except (OSError, ValueError):
-        skip = []
-    state = State(args.rb_db.expanduser(), args.folder_name, d.load_aliases(here / "aliases.json"), skip)
+    settings = d.load_settings(here / "settings.json")
+    state = State(args.rb_db.expanduser(), args.folder_name, d.load_aliases(here / "aliases.json"),
+                  settings["skip_folders"], settings["also_check"])
     print("Reading RekordBox (on a copy)...")
     state.refresh_rb()
 
